@@ -3,6 +3,7 @@
 #include <sys/ioctl.h> 
 #include <sys/socket.h>
 #include <arpa/inet.h>
+#include <libnet.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
@@ -14,12 +15,15 @@
 #include <string>
 
 #define ETHERNET_HEADER_SIZE 14
-#define FORWARD_FIN_ACK 0x011
+#define FORWARD_RST_ACK 0x014
+#define FORWARD_RST 0b00000100
 #define BACKWARD_RST_ACK 0x014
+#define BACKWARD_FIN_ACK 0x011
 
 #define MAC_ALEN 6
 
 extern const uint32_t SIZE_OF_PACKET;
+extern const uint32_t SIZE_OF_PACKET_WITH_MSG;
 extern uint8_t myMac[6];
 extern const char *msg;
 extern char *hostName;
@@ -32,8 +36,14 @@ typedef struct EthernetHeader{
 }EthHdr;
 
 typedef struct IPHeader{
+#if (LIBNET_LIL_ENDIAN)
     uint8_t _hlen : 4;
     uint8_t _ver : 4;
+#endif
+#if (LIBNET_BIG_ENDIAN)
+    uint8_t _ver : 4;
+    uint8_t _hlen : 4;
+#endif
     uint8_t _tos;
     uint16_t _totLen;
     uint16_t _id;
@@ -41,7 +51,7 @@ typedef struct IPHeader{
     uint16_t _fragOffset : 13;
     uint8_t _ttl;
     uint8_t _protocol;
-    uint8_t _hdrChksum;
+    uint16_t _hdrChksum;
     struct in_addr _sIP;
     struct in_addr _dIP;
 }IpHdr;
@@ -51,9 +61,15 @@ typedef struct tcpHeader {
     uint16_t _dPort;
     uint32_t _seq;
     uint32_t _ack;
-    uint16_t _unused : 4;
-    uint16_t _offset : 4;
-    uint16_t _flags : 8;
+#if (LIBNET_LIL_ENDIAN)
+    uint8_t _unused : 4;
+    uint8_t _offset : 4;
+#endif
+#if (LIBNET_BIG_ENDIAN)
+    uint8_t _offset : 4;
+    uint8_t _unused : 4;
+#endif
+    uint8_t _flags;
     uint16_t _winSz;
     uint16_t _chksum;
     uint16_t _urgP;
@@ -69,8 +85,8 @@ typedef struct packet {
 typedef struct psdHeader {
 	struct in_addr m_daddr;
 	struct in_addr m_saddr;
-	uint32_t m_mbz;
-	uint16_t m_ptcl;
+	uint8_t m_mbz;
+	uint8_t m_ptcl;
 	uint16_t m_tcpl;
 }PsdHeader;
 
@@ -78,6 +94,7 @@ typedef struct psdHeader {
 void usage();
 void init(char* argv[]);
 void setTarget(const char *target);
+void dump(unsigned char* buf, int size);
 
 void newLine();
 void printEthHdr(const EthHdr *ethHdr);
@@ -94,7 +111,7 @@ void printInt32(const uint32_t num);
 void printInt32b(const uint32_t num);
 
 Packet *makePacket();
-void sendPacket(u_char *packet, int size, pcap_t *handle);
+void sendPacket(u_char *packet, int size, pcap_t *handle, int flag);
 bool isValidPacket(const u_char* packet);
 
 void block(pcap_t *handle);

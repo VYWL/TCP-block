@@ -1,7 +1,8 @@
 #include "functions.h"
 
 const uint32_t SIZE_OF_PACKET = (uint32_t)sizeof(EthHdr) + (uint32_t)sizeof(IpHdr) + (uint32_t)sizeof(TcpHdr);
-const char *msg = "HTTP/1.0 302 Redirect\r\nLocation: http://warning.or.kr\r\n";
+const char *msg = "HTTP/1.0 302 Redirect\r\nLocation: http://warning.or.kr\r\n\r\n";
+const uint32_t SIZE_OF_PACKET_WITH_MSG = SIZE_OF_PACKET + strlen(msg);
 char *hostName;
 uint8_t myMac[6];
 std::vector<int> pi;
@@ -22,24 +23,173 @@ void init(char* argv[]) {
 	getMyMacAddr(argv[1]);
 }
 
-bool isValidPacket(const u_char* packet) {
-	EthHdr *ethHeader = (EthHdr *)packet;
+void block(pcap_t *handle) {
+
+	while(true) {
+		struct pcap_pkthdr* header;
+		const u_char* packet;
+
+		// Capture Packet
+		int res = pcap_next_ex(handle, &header, &packet);
+		if (res == 0) continue;
+		if (res == PCAP_ERROR || res == PCAP_ERROR_BREAK) {
+			printf("pcap_next_ex return %d(%s)\n", res, pcap_geterr(handle));
+			break;
+		}
+
+		// check Validation
+		if(!isValidPacket(packet)) continue;
+
+		// Print RAW TCP Packet
+		// newLine();
+		// printf("RAW\n");
+		// printTCP(packet);
+
+		// Generate Packet
+		u_char *forwardPacket = genBlockingForward(packet, FORWARD_RST_ACK);
+
+		// Print MODIFIED TCP Packet
+		// newLine();
+		// printf("MODIFIED\n");
+		// printTCP(forwardPacket);
+
+		u_char *backwardPacket = genBlockingBackward(packet, BACKWARD_FIN_ACK, msg);
+
+		// Send Packet
+		// sendPacket( forwardPacket, SIZE_OF_PACKET, handle, 1);
+		sendPacket(backwardPacket, SIZE_OF_PACKET_WITH_MSG, handle, 1);
+
+		// Free new
+		free(forwardPacket);
+		free(backwardPacket);
+
+	}
+}
+
+u_char *genBlockingForward(const u_char *packet, int flag) {
+	// 먼저 패킷크기에 해당하는 만큼 deep copy
+
+	u_char *forwardPacket = (u_char *)malloc(SIZE_OF_PACKET);
+	memcpy(forwardPacket, packet, SIZE_OF_PACKET);
+
+	// 반환 패킷을 shallow copy => 수정에 용이하도록
+	Packet *packetClone = makePacket();
+	setPacket(packetClone, forwardPacket);
+
+	// FORWARD는 무조건 RST를 보내기에 data는 추가부분이 없음
+
+	auto newSeq = ntohl(packetClone->_tcpHdr->_seq) + ntohs(packetClone->_ipHdr->_totLen) - (packetClone->_ipHdr->_hlen + packetClone->_tcpHdr->_offset) * 4;
+
+	// FORWARD의 TCP헤더는 flag와 크기를 수정해야함(RST). 이때 SYN은 RESET
+	packetClone->_tcpHdr->_flags = FORWARD_RST_ACK;
+	packetClone->_tcpHdr->_seq = htonl(newSeq);
+	packetClone->_tcpHdr->_offset = 5;
+	packetClone->_tcpHdr->_urgP = 0;
+	packetClone->_tcpHdr->_unused = 0;
+	// flag = FORWARD_RST_ACK;
+	// windowsize = 0;
+
+	// FORWARD의 IP헤더는 길이만을 수정해주면 된다.
+	packetClone->_ipHdr->_totLen = htons(sizeof(IpHdr) + sizeof(TcpHdr));
+	// len = sizeof(IP) + sizeof(TCP);
+
+	// FORWARD의 IP 및 TCP의 Checksum 계산을 수행해준다.
+	setTcpCheckSum(packetClone->_ipHdr, packetClone->_tcpHdr, nullptr, 0);
+	setIpCheckSum(packetClone->_ipHdr);
+
+	// FORWARD의 Ether헤더는 smac과 dmac을 수정해준다.
+	// 기존에 계산해 두었던 mymac을 smac에 넣어주는게 전부이다.
+	// memcpy(packetClone->_ethHdr->_smac, myMac, MAC_ALEN);
+
+	free(packetClone);
+
+	return forwardPacket;
+}
+
+u_char *genBlockingBackward(const u_char *packet, int flag, const char *_msg) {
+	// 먼저 패킷크기에 해당하는 만큼 deep copy
+	u_char *backwardPacket = (u_char *)malloc(SIZE_OF_PACKET_WITH_MSG);
+	memcpy(backwardPacket, packet, SIZE_OF_PACKET);
+
+	// 반환 패킷을 shallow copy => 수정에 용이하도록
+	Packet *packetClone = makePacket();
+	setPacket(packetClone, backwardPacket);
+
+	// BACKWARD는 FIN를 보내는 경우에 한해서 data를 추가.
+	u_char *payload = (u_char *)(backwardPacket + SIZE_OF_PACKET);
+ 	memcpy(payload, _msg, strlen(_msg));
+
+	// BACKWARD의 TCP헤더는 flag와 크기를 수정해야함(RST). 이때 SYN은 RESET
+	std::swap(packetClone->_tcpHdr->_dPort, packetClone->_tcpHdr->_sPort);
+	std::swap(packetClone->_tcpHdr->_seq,   packetClone->_tcpHdr->_ack);
+	packetClone->_tcpHdr->_flags  = BACKWARD_FIN_ACK;
+	packetClone->_tcpHdr->_offset = 5;
+	packetClone->_tcpHdr->_urgP   = 0;
+	packetClone->_tcpHdr->_unused = 0;
+	// flag = BACKWARD_RST_ACK or BACKWARD_FIN_ACK;
+	// windowsize = 0;
+
+	// BACKWARD의 IP헤더는 길이만을 수정해주면 된다.
+	std::swap(packetClone->_ipHdr->_dIP, packetClone->_ipHdr->_sIP);
+	packetClone->_ipHdr->_ttl    = 0x80;
+	packetClone->_ipHdr->_totLen = htons(sizeof(IpHdr) + sizeof(TcpHdr) + strlen(_msg));
+	// len = sizeof(IP) + sizeof(TCP);
+
+	// BACKWARD의 IP 및 TCP의 Checksum 계산을 수행해준다.
+	setTcpCheckSum(packetClone->_ipHdr, packetClone->_tcpHdr, (char *)_msg, strlen(_msg));
+	setIpCheckSum(packetClone->_ipHdr);
+
+	// BACKWARD의 Ether헤더는 smac과 dmac을 수정해준다.
+	// 기존에 계산해 두었던 mymac을 smac에 넣어주는게 전부이다
+	std::swap(packetClone->_ethHdr->_dmac, packetClone->_ethHdr->_smac);
 	
-	bool isIpPacket = (ethHeader->_type) == 0x08;
+	free(packetClone);
+
+	return backwardPacket;
+}
+
+void sendPacket(u_char *packet, int size, pcap_t *handle, int flag) {
+
+	printf("SENT! :: %d\n", size);
+	
+	if(flag) {
+		printTCP(packet);
+		dump(packet, size);
+	}
+
+	int res = pcap_sendpacket(handle, (const u_char *)packet, size);
+	if (res != 0) {
+		fprintf(stderr, "pcap_sendpacket return %d error=%s\n", res, pcap_geterr(handle));
+		fprintf(stderr, "Size : %lu\n", size);
+		exit(-1);
+	}
+}
+
+bool isValidPacket(const u_char* packet) {
+	// Ethernet Header :: IP check
+	EthHdr *ethHeader = (EthHdr *)packet;
+	bool isIpPacket = ntohs(ethHeader->_type) == 0x0800;
 
 	if(!isIpPacket) return false;
 
+	// Ip Header :: TCP check
     packet += ETHERNET_HEADER_SIZE;
     IpHdr *ipHeader = (IpHdr*)packet;
-	int ipHeaderLength = ipHeader->_hlen * 4;
-    packet += ipHeaderLength;
-	TcpHdr *tcpHdr = (TcpHdr *)(packet);
 
 	bool isTcpPacket = (ipHeader->_protocol) == 0x06;
 
 	if(!isTcpPacket) return false;
 
-	// check HOST
+	// TCP Header :: HTTP check
+	int ipHeaderLength = ipHeader->_hlen * 4;
+    packet += ipHeaderLength;
+	TcpHdr *tcpHdr = (TcpHdr *)(packet);
+
+	bool isHTTPRequest = ntohs(tcpHdr->_dPort) == 80;
+
+	if(!isHTTPRequest) return false;
+
+	// TCP Payload :: Host check
     int tcpHeaderLength = (int)(tcpHdr->_offset * 4);
 
     char *httpPayload = (char *)(packet + tcpHeaderLength);
@@ -51,8 +201,9 @@ bool isValidPacket(const u_char* packet) {
 	packet -= ETHERNET_HEADER_SIZE + ipHeaderLength;
 
 	if(isDetected) {
-		printf("TARGET :: %s\n", hostName);
-		printf("STATUS :: %s\n", isDetected ? "DETECTED" : "NON-DETECTED");
+		// printf("TARGET :: %s\n", hostName);
+		// printf("PAYLOAD :: %s\n", httpPayload);
+		// printf("STATUS :: %s\n", isDetected ? "DETECTED" : "NON-DETECTED");
 	}
 
 
@@ -151,15 +302,15 @@ uint16_t getCheckSum(uint16_t *buffer, int size)
     return (uint16_t)(~cksum);
 }
 
-uint16_t setTcpCheckSum(IpHdr *iph, TcpHdr *tcph, char* data,int size)
+uint16_t setTcpCheckSum(IpHdr *iph, TcpHdr *tcph, char* data, int size)
 {
 	tcph->_chksum = 0;
 	PsdHeader psd_header;
 	psd_header.m_daddr = iph->_dIP;
 	psd_header.m_saddr = iph->_sIP;
 	psd_header.m_mbz = 0;
-	psd_header.m_ptcl = IPPROTO_TCP;
-	psd_header.m_tcpl = htons(sizeof(TcpHdr)+size);
+	psd_header.m_ptcl = iph->_protocol;
+	psd_header.m_tcpl = htons(tcph->_offset * 4);
 
 	char tcpBuf[65536];
 	memcpy(tcpBuf, &psd_header, sizeof(PsdHeader));
@@ -229,7 +380,7 @@ void printIpHdr(const IpHdr *ipHdr) {
 	printf("%-15s => ", "TOS");           printInt8((ipHdr->_tos));
 	printf("%-15s => ", "TOTLEN");        printInt16((ipHdr->_totLen));
 	printf("%-15s => ", "ID");            printInt16((ipHdr->_id));
-	printf("%-15s => ", "TTL");           printInt16((ipHdr->_ttl));
+	printf("%-15s => ", "TTL");           printInt8((ipHdr->_ttl));
 	printf("%-15s => ", "PROTOCOL");      printf("TCP\n");
 	printf("%-15s => ", "CHECKSUM");      printInt16b((ipHdr->_hdrChksum));
 	printf("%-15s => ", "SOURCEIP");      printIP((ipHdr->_sIP));
@@ -266,4 +417,14 @@ void printInt32(const uint32_t num) {
 }
 void printInt32b(const uint32_t num) {
 	printf("%x\n", ntohl(num));
+}
+
+void dump(unsigned char* buf, int size) {
+	int i;
+	for (i = 0; i < size; i++) {
+		if (i != 0 && i % 8 == 0)
+			printf("\n");
+		printf("%02X ", buf[i]);
+	}
+	printf("\n");
 }
