@@ -150,13 +150,6 @@ u_char *genBlockingBackward(const u_char *packet, int flag, const char *_msg) {
 
 void sendPacket(u_char *packet, int size, pcap_t *handle, int flag) {
 
-	printf("SENT! :: %d\n", size);
-	
-	if(flag) {
-		printTCP(packet);
-		dump(packet, size);
-	}
-
 	int res = pcap_sendpacket(handle, (const u_char *)packet, size);
 	if (res != 0) {
 		fprintf(stderr, "pcap_sendpacket return %d error=%s\n", res, pcap_geterr(handle));
@@ -310,7 +303,7 @@ uint16_t setTcpCheckSum(IpHdr *iph, TcpHdr *tcph, char* data, int size)
 	psd_header.m_saddr = iph->_sIP;
 	psd_header.m_mbz = 0;
 	psd_header.m_ptcl = iph->_protocol;
-	psd_header.m_tcpl = htons(tcph->_offset * 4);
+	psd_header.m_tcpl = htons(tcph->_offset * 4 + size);
 
 	char tcpBuf[65536];
 	memcpy(tcpBuf, &psd_header, sizeof(PsdHeader));
