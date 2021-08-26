@@ -1,7 +1,7 @@
 #include "functions.h"
 
 const uint32_t SIZE_OF_PACKET = (uint32_t)sizeof(EthHdr) + (uint32_t)sizeof(IpHdr) + (uint32_t)sizeof(TcpHdr);
-const char *msg = "HTTP/1.0 302 Redirect\r\nLocation: http://warning.or.kr\r\n\r\n";
+const char *msg = "HTTP/1.0 302 Redirect\r\nLocation: http://warning.or.kr\r\n";
 const uint32_t SIZE_OF_PACKET_WITH_MSG = SIZE_OF_PACKET + strlen(msg);
 char *hostName;
 uint8_t myMac[6];
@@ -40,30 +40,40 @@ void block(pcap_t *handle) {
 		// check Validation
 		if(!isValidPacket(packet)) continue;
 
-		// Print RAW TCP Packet
-		// newLine();
-		// printf("RAW\n");
-		// printTCP(packet);
+		// Port check => Backward Flag 설정을 위해
+		bool isHTTP = checkHTTP(packet);
 
 		// Generate Packet
-		u_char *forwardPacket = genBlockingForward(packet, FORWARD_RST_ACK);
+		u_char *forwardPacket = nullptr;
+		forwardPacket = genBlockingForward(packet, FORWARD_RST_ACK);
 
-		// Print MODIFIED TCP Packet
-		// newLine();
-		// printf("MODIFIED\n");
-		// printTCP(forwardPacket);
-
-		u_char *backwardPacket = genBlockingBackward(packet, BACKWARD_FIN_ACK, msg);
+		u_char *backwardPacket = nullptr;
+		if(isHTTP)
+			backwardPacket = genBlockingBackward(packet, BACKWARD_FIN_ACK, msg);
+		else
+			backwardPacket = genBlockingBackward(packet, BACKWARD_RST_ACK, nullptr);
 
 		// Send Packet
-		// sendPacket( forwardPacket, SIZE_OF_PACKET, handle, 1);
-		sendPacket(backwardPacket, SIZE_OF_PACKET_WITH_MSG, handle, 1);
+		sendPacket(forwardPacket, SIZE_OF_PACKET, handle, 0);
+
+		if(isHTTP)
+			sendPacket(backwardPacket, SIZE_OF_PACKET_WITH_MSG, handle, 1);
+		else
+			sendPacket(backwardPacket, SIZE_OF_PACKET, handle, 1);
 
 		// Free new
 		free(forwardPacket);
 		free(backwardPacket);
 
 	}
+}
+
+bool checkHTTP(const u_char *packet) {
+	packet += ETHERNET_HEADER_SIZE;
+	auto ipHdrLen = ((IpHdr *)(packet))->_hlen * 4;
+	TcpHdr *tcpHdr = (TcpHdr *)(packet + ipHdrLen);
+
+	return ntohs(tcpHdr->_dPort) == 80;
 }
 
 u_char *genBlockingForward(const u_char *packet, int flag) {
@@ -76,30 +86,20 @@ u_char *genBlockingForward(const u_char *packet, int flag) {
 	Packet *packetClone = makePacket();
 	setPacket(packetClone, forwardPacket);
 
-	// FORWARD는 무조건 RST를 보내기에 data는 추가부분이 없음
-
-	auto newSeq = ntohl(packetClone->_tcpHdr->_seq) + ntohs(packetClone->_ipHdr->_totLen) - (packetClone->_ipHdr->_hlen + packetClone->_tcpHdr->_offset) * 4;
-
-	// FORWARD의 TCP헤더는 flag와 크기를 수정해야함(RST). 이때 SYN은 RESET
-	packetClone->_tcpHdr->_flags = FORWARD_RST_ACK;
-	packetClone->_tcpHdr->_seq = htonl(newSeq);
-	packetClone->_tcpHdr->_offset = 5;
-	packetClone->_tcpHdr->_urgP = 0;
-	packetClone->_tcpHdr->_unused = 0;
-	// flag = FORWARD_RST_ACK;
-	// windowsize = 0;
+	// FORWARD의 TCP헤더는 flag와 크기를 수정해야함(RST). 이때 SYN은 Disable
+	auto dataLen = ntohs(packetClone->_ipHdr->_totLen) - (packetClone->_ipHdr->_hlen + packetClone->_tcpHdr->_offset) * 4;
+	packetClone->_tcpHdr->_flags 	= flag;
+	packetClone->_tcpHdr->_seq		= htonl(ntohl(packetClone->_tcpHdr->_seq) + dataLen);
+	packetClone->_tcpHdr->_offset 	= 5;
+	packetClone->_tcpHdr->_urgP   	= 0;
+	packetClone->_tcpHdr->_unused 	= 0;
 
 	// FORWARD의 IP헤더는 길이만을 수정해주면 된다.
 	packetClone->_ipHdr->_totLen = htons(sizeof(IpHdr) + sizeof(TcpHdr));
-	// len = sizeof(IP) + sizeof(TCP);
 
 	// FORWARD의 IP 및 TCP의 Checksum 계산을 수행해준다.
 	setTcpCheckSum(packetClone->_ipHdr, packetClone->_tcpHdr, nullptr, 0);
 	setIpCheckSum(packetClone->_ipHdr);
-
-	// FORWARD의 Ether헤더는 smac과 dmac을 수정해준다.
-	// 기존에 계산해 두었던 mymac을 smac에 넣어주는게 전부이다.
-	// memcpy(packetClone->_ethHdr->_smac, myMac, MAC_ALEN);
 
 	free(packetClone);
 
@@ -108,39 +108,52 @@ u_char *genBlockingForward(const u_char *packet, int flag) {
 
 u_char *genBlockingBackward(const u_char *packet, int flag, const char *_msg) {
 	// 먼저 패킷크기에 해당하는 만큼 deep copy
-	u_char *backwardPacket = (u_char *)malloc(SIZE_OF_PACKET_WITH_MSG);
+
+	u_char *backwardPacket = NULL;
+
+	if (flag == BACKWARD_FIN_ACK)
+		backwardPacket = (u_char *)malloc(SIZE_OF_PACKET_WITH_MSG * sizeof(u_char));
+	if (flag == BACKWARD_RST_ACK)
+		backwardPacket = (u_char *)malloc(SIZE_OF_PACKET * sizeof(u_char));
+	
 	memcpy(backwardPacket, packet, SIZE_OF_PACKET);
 
 	// 반환 패킷을 shallow copy => 수정에 용이하도록
-	Packet *packetClone = makePacket();
+	Packet *  packetClone = makePacket();
 	setPacket(packetClone, backwardPacket);
 
 	// BACKWARD는 FIN를 보내는 경우에 한해서 data를 추가.
-	u_char *payload = (u_char *)(backwardPacket + SIZE_OF_PACKET);
- 	memcpy(payload, _msg, strlen(_msg));
+	if (flag == BACKWARD_FIN_ACK) {
+		u_char *payload = (u_char *)(backwardPacket + SIZE_OF_PACKET);
+		memcpy(payload, _msg, strlen(_msg));
+	}
 
 	// BACKWARD의 TCP헤더는 flag와 크기를 수정해야함(RST). 이때 SYN은 RESET
-	std::swap(packetClone->_tcpHdr->_dPort, packetClone->_tcpHdr->_sPort);
-	std::swap(packetClone->_tcpHdr->_seq,   packetClone->_tcpHdr->_ack);
-	packetClone->_tcpHdr->_flags  = BACKWARD_FIN_ACK;
-	packetClone->_tcpHdr->_offset = 5;
-	packetClone->_tcpHdr->_urgP   = 0;
-	packetClone->_tcpHdr->_unused = 0;
-	// flag = BACKWARD_RST_ACK or BACKWARD_FIN_ACK;
-	// windowsize = 0;
+	std::swap(packetClone->_tcpHdr->_dPort,	packetClone->_tcpHdr->_sPort);
+	std::swap(packetClone->_tcpHdr->_seq,	packetClone->_tcpHdr->_ack);
+	packetClone->_tcpHdr->_flags	= flag;
+	packetClone->_tcpHdr->_offset	= 5;
+	packetClone->_tcpHdr->_urgP		= 0;
+	packetClone->_tcpHdr->_unused	= 0;
 
 	// BACKWARD의 IP헤더는 길이만을 수정해주면 된다.
 	std::swap(packetClone->_ipHdr->_dIP, packetClone->_ipHdr->_sIP);
 	packetClone->_ipHdr->_ttl    = 0x80;
-	packetClone->_ipHdr->_totLen = htons(sizeof(IpHdr) + sizeof(TcpHdr) + strlen(_msg));
-	// len = sizeof(IP) + sizeof(TCP);
+
+	if (flag == BACKWARD_FIN_ACK)
+		packetClone->_ipHdr->_totLen = htons(sizeof(IpHdr) + sizeof(TcpHdr) + strlen(_msg));
+	if (flag == BACKWARD_RST_ACK)
+		packetClone->_ipHdr->_totLen = htons(sizeof(IpHdr) + sizeof(TcpHdr));
 
 	// BACKWARD의 IP 및 TCP의 Checksum 계산을 수행해준다.
-	setTcpCheckSum(packetClone->_ipHdr, packetClone->_tcpHdr, (char *)_msg, strlen(_msg));
+	if (flag == BACKWARD_FIN_ACK)
+		setTcpCheckSum(packetClone->_ipHdr, packetClone->_tcpHdr, (char *)_msg, strlen(_msg));
+	if (flag == BACKWARD_RST_ACK)
+		setTcpCheckSum(packetClone->_ipHdr, packetClone->_tcpHdr, NULL, 0);
+
 	setIpCheckSum(packetClone->_ipHdr);
 
 	// BACKWARD의 Ether헤더는 smac과 dmac을 수정해준다.
-	// 기존에 계산해 두었던 mymac을 smac에 넣어주는게 전부이다
 	std::swap(packetClone->_ethHdr->_dmac, packetClone->_ethHdr->_smac);
 	
 	free(packetClone);
@@ -148,7 +161,8 @@ u_char *genBlockingBackward(const u_char *packet, int flag, const char *_msg) {
 	return backwardPacket;
 }
 
-void sendPacket(u_char *packet, int size, pcap_t *handle, int flag) {
+void sendPacket(u_char *packet, int size, pcap_t *handle, int flag) {	
+	if(flag) printf("BLOCKED!\n");
 
 	int res = pcap_sendpacket(handle, (const u_char *)packet, size);
 	if (res != 0) {
@@ -178,10 +192,6 @@ bool isValidPacket(const u_char* packet) {
     packet += ipHeaderLength;
 	TcpHdr *tcpHdr = (TcpHdr *)(packet);
 
-	bool isHTTPRequest = ntohs(tcpHdr->_dPort) == 80;
-
-	if(!isHTTPRequest) return false;
-
 	// TCP Payload :: Host check
     int tcpHeaderLength = (int)(tcpHdr->_offset * 4);
 
@@ -192,13 +202,6 @@ bool isValidPacket(const u_char* packet) {
 	bool isDetected = useKMP(httpPayload, keyWord.c_str());
 
 	packet -= ETHERNET_HEADER_SIZE + ipHeaderLength;
-
-	if(isDetected) {
-		// printf("TARGET :: %s\n", hostName);
-		// printf("PAYLOAD :: %s\n", httpPayload);
-		// printf("STATUS :: %s\n", isDetected ? "DETECTED" : "NON-DETECTED");
-	}
-
 
     return isDetected;
 }
@@ -347,6 +350,14 @@ Packet *makePacket() {
 	newPacket->_tcpHdr = NULL;
 
 	return newPacket;
+}
+
+void freePacket(Packet *removePacket) {
+	removePacket->_ethHdr = NULL;
+	removePacket->_ipHdr  = NULL;
+	removePacket->_tcpHdr = NULL;
+
+	free(removePacket);
 }
 
 void newLine() {

@@ -111,10 +111,12 @@ void printInt32(const uint32_t num);
 void printInt32b(const uint32_t num);
 
 Packet *makePacket();
+void freePacket(Packet *removePacket);
 void sendPacket(u_char *packet, int size, pcap_t *handle, int flag);
 bool isValidPacket(const u_char* packet);
 
 void block(pcap_t *handle);
+bool checkHTTP(const u_char *packet);
 void setPacket(Packet *packet, const u_char *captured);
 void getMyMacAddr(char *ifname);
 uint16_t getCheckSum(uint16_t *buffer, int size);
