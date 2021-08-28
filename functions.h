@@ -14,13 +14,15 @@
 #include <stdlib.h>
 #include <string>
 
-#define ETHERNET_HEADER_SIZE 14
-#define FORWARD_RST_ACK 0x014
-#define FORWARD_RST 0b00000100
-#define BACKWARD_RST_ACK 0x014
-#define BACKWARD_FIN_ACK 0x011
+#define ETHERNET_HEADER_SIZE    14
+#define FORWARD_RST_ACK         0x014
+#define FORWARD_RST             0b00000100
+#define BACKWARD_RST_ACK        0x014
+#define BACKWARD_FIN_ACK        0x011
 
-#define MAC_ALEN 6
+#define MAC_ALEN                6
+#define PRINT_DETAIL            1
+#define NO_PRINT                0
 
 extern const uint32_t SIZE_OF_PACKET;
 extern const uint32_t SIZE_OF_PACKET_WITH_MSG;
@@ -37,18 +39,18 @@ typedef struct EthernetHeader{
 
 typedef struct IPHeader{
 #if (LIBNET_LIL_ENDIAN)
-    uint8_t _hlen : 4;
-    uint8_t _ver : 4;
+    uint8_t _hlen           : 4;
+    uint8_t _ver            : 4;
 #endif
 #if (LIBNET_BIG_ENDIAN)
-    uint8_t _ver : 4;
-    uint8_t _hlen : 4;
+    uint8_t _ver            : 4;
+    uint8_t _hlen           : 4;
 #endif
     uint8_t _tos;
     uint16_t _totLen;
     uint16_t _id;
-    uint16_t _flag : 3;
-    uint16_t _fragOffset : 13;
+    uint16_t _flag          : 3;
+    uint16_t _fragOffset    : 13;
     uint8_t _ttl;
     uint8_t _protocol;
     uint16_t _hdrChksum;
@@ -62,12 +64,12 @@ typedef struct tcpHeader {
     uint32_t _seq;
     uint32_t _ack;
 #if (LIBNET_LIL_ENDIAN)
-    uint8_t _unused : 4;
-    uint8_t _offset : 4;
+    uint8_t _unused         : 4;
+    uint8_t _offset         : 4;
 #endif
 #if (LIBNET_BIG_ENDIAN)
-    uint8_t _offset : 4;
-    uint8_t _unused : 4;
+    uint8_t _offset         : 4;
+    uint8_t _unused         : 4;
 #endif
     uint8_t _flags;
     uint16_t _winSz;
@@ -97,12 +99,12 @@ void setTarget(const char *target);
 void dump(unsigned char* buf, int size);
 
 void newLine();
+void printTcpHdr(const TcpHdr *ipHdr);
 void printEthHdr(const EthHdr *ethHdr);
 void printIpHdr(const IpHdr *ipHdr);
 void printTCP(const u_char *captured);
 void printMAC(const uint8_t *mac);
 void printIP(const in_addr ip);
-void printTcpHdr(const TcpHdr *ipHdr);
 
 void printInt8(const uint8_t num);
 void printInt16(const uint16_t num);
@@ -112,12 +114,12 @@ void printInt32b(const uint32_t num);
 
 Packet *makePacket();
 void freePacket(Packet *removePacket);
+void setPacket(Packet *packet, const u_char *captured);
 void sendPacket(u_char *packet, int size, pcap_t *handle, int flag);
-bool isValidPacket(const u_char* packet);
 
 void block(pcap_t *handle);
 bool checkHTTP(const u_char *packet);
-void setPacket(Packet *packet, const u_char *captured);
+bool isValidPacket(const u_char* packet);
 void getMyMacAddr(char *ifname);
 uint16_t getCheckSum(uint16_t *buffer, int size);
 uint16_t setIpCheckSum(IpHdr *iph);

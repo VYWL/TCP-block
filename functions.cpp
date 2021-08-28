@@ -25,6 +25,7 @@ void init(char* argv[]) {
 
 void block(pcap_t *handle) {
 
+	// 지속적으로 Packet Capture
 	while(true) {
 		struct pcap_pkthdr* header;
 		const u_char* packet;
@@ -37,17 +38,17 @@ void block(pcap_t *handle) {
 			break;
 		}
 
-		// check Validation
+		// check Validation :: IP - TCP - Payload Check
 		if(!isValidPacket(packet)) continue;
 
-		// Port check => Backward Flag 설정을 위해
+		// Port check
 		bool isHTTP = checkHTTP(packet);
 
 		// Generate Packet
-		u_char *forwardPacket = nullptr;
-		forwardPacket = genBlockingForward(packet, FORWARD_RST_ACK);
+		u_char *forwardPacket = genBlockingForward(packet, FORWARD_RST_ACK);
 
 		u_char *backwardPacket = nullptr;
+
 		if(isHTTP)
 			backwardPacket = genBlockingBackward(packet, BACKWARD_FIN_ACK, msg);
 		else
@@ -57,9 +58,9 @@ void block(pcap_t *handle) {
 		sendPacket(forwardPacket, SIZE_OF_PACKET, handle, 0);
 
 		if(isHTTP)
-			sendPacket(backwardPacket, SIZE_OF_PACKET_WITH_MSG, handle, 1);
+			sendPacket(backwardPacket, SIZE_OF_PACKET_WITH_MSG, handle, PRINT_DETAIL);
 		else
-			sendPacket(backwardPacket, SIZE_OF_PACKET, handle, 1);
+			sendPacket(backwardPacket, SIZE_OF_PACKET, handle, PRINT_DETAIL);
 
 		// Free new
 		free(forwardPacket);
@@ -77,12 +78,12 @@ bool checkHTTP(const u_char *packet) {
 }
 
 u_char *genBlockingForward(const u_char *packet, int flag) {
-	// 먼저 패킷크기에 해당하는 만큼 deep copy
 
+	// 먼저 패킷크기에 해당하는 만큼 deep copy
 	u_char *forwardPacket = (u_char *)malloc(SIZE_OF_PACKET);
 	memcpy(forwardPacket, packet, SIZE_OF_PACKET);
 
-	// 반환 패킷을 shallow copy => 수정에 용이하도록
+	// 반환할 패킷을 shallow copy => 수정에 용이하도록
 	Packet *packetClone = makePacket();
 	setPacket(packetClone, forwardPacket);
 
@@ -101,16 +102,16 @@ u_char *genBlockingForward(const u_char *packet, int flag) {
 	setTcpCheckSum(packetClone->_ipHdr, packetClone->_tcpHdr, nullptr, 0);
 	setIpCheckSum(packetClone->_ipHdr);
 
+	// 수정용도로 할당했던 패킷 메모리 해제
 	free(packetClone);
 
 	return forwardPacket;
 }
 
 u_char *genBlockingBackward(const u_char *packet, int flag, const char *_msg) {
+
 	// 먼저 패킷크기에 해당하는 만큼 deep copy
-
 	u_char *backwardPacket = NULL;
-
 	if (flag == BACKWARD_FIN_ACK)
 		backwardPacket = (u_char *)malloc(SIZE_OF_PACKET_WITH_MSG * sizeof(u_char));
 	if (flag == BACKWARD_RST_ACK)
@@ -156,12 +157,14 @@ u_char *genBlockingBackward(const u_char *packet, int flag, const char *_msg) {
 	// BACKWARD의 Ether헤더는 smac과 dmac을 수정해준다.
 	std::swap(packetClone->_ethHdr->_dmac, packetClone->_ethHdr->_smac);
 	
+	// 수정용도로 할당했던 패킷 메모리 해제
 	free(packetClone);
 
 	return backwardPacket;
 }
 
 void sendPacket(u_char *packet, int size, pcap_t *handle, int flag) {	
+	
 	if(flag) printf("BLOCKED!\n");
 
 	int res = pcap_sendpacket(handle, (const u_char *)packet, size);
@@ -187,12 +190,11 @@ bool isValidPacket(const u_char* packet) {
 
 	if(!isTcpPacket) return false;
 
-	// TCP Header :: HTTP check
+	// TCP Payload :: Host check
 	int ipHeaderLength = ipHeader->_hlen * 4;
     packet += ipHeaderLength;
 	TcpHdr *tcpHdr = (TcpHdr *)(packet);
 
-	// TCP Payload :: Host check
     int tcpHeaderLength = (int)(tcpHdr->_offset * 4);
 
     char *httpPayload = (char *)(packet + tcpHeaderLength);
